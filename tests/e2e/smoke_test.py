@@ -189,11 +189,12 @@ class APITestRunner:
         print(f"TESTING: {api_name}")
         print(f"{'=' * 80}")
 
-        # Print request metadata only (never values) to avoid leaking secrets
+        # Print request metadata only (never request values) to avoid
+        # clear-text logging of credentials/secrets.
         if request_params:
             print("\nREQUEST:")
             if isinstance(request_params, dict):
-                print(json.dumps({"fields": sorted(request_params.keys())}, indent=2, default=str))
+                print(json.dumps({"param_keys": sorted(request_params.keys())}, indent=2, default=str))
             else:
                 print(json.dumps({"request_type": type(request_params).__name__}, indent=2, default=str))
 
