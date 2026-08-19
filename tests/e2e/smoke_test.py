@@ -189,11 +189,13 @@ class APITestRunner:
         print(f"TESTING: {api_name}")
         print(f"{'=' * 80}")
 
-        # Print request parameters if provided
+        # Print request metadata only (never values) to avoid leaking secrets
         if request_params:
             print("\nREQUEST:")
-            safe_request_params = self._redact_sensitive_data(request_params)
-            print(json.dumps(safe_request_params, indent=2, default=str))
+            if isinstance(request_params, dict):
+                print(json.dumps({"fields": sorted(request_params.keys())}, indent=2, default=str))
+            else:
+                print(json.dumps({"request_type": type(request_params).__name__}, indent=2, default=str))
 
         start = time.perf_counter()
 
@@ -280,11 +282,11 @@ enter_totp_manually = input(
 
 if enter_totp_manually:
     totp_code = input("Enter TOTP code: ").strip()
-    print(f"\n[MANUAL TOTP]: {totp_code}")
+    print("\n[MANUAL TOTP]: received")
 else:
     totp_generator = pyotp.TOTP(TOTP_SECRET)
     totp_code = totp_generator.now()
-    print(f"\n[AUTO-GENERATED TOTP]: {totp_code}")
+    print("\n[AUTO-GENERATED TOTP]: generated")
 
 totp_login_params = {
     "mobile_number": MOBILE_NUMBER,
