@@ -151,15 +151,52 @@ class APITestRunner:
 
         return response
 
+    def _redact_sensitive_data(self, value):
+        sensitive_keys = {
+            "mobile_number",
+            "ucc",
+            "totp",
+            "mpin",
+            "password",
+            "passcode",
+            "secret",
+            "token",
+            "api_key",
+            "access_token",
+            "refresh_token",
+            "authorization",
+        }
+
+        if isinstance(value, dict):
+            redacted = {}
+            for k, v in value.items():
+                if str(k).lower() in sensitive_keys:
+                    redacted[k] = "***REDACTED***"
+                else:
+                    redacted[k] = self._redact_sensitive_data(v)
+            return redacted
+
+        if isinstance(value, list):
+            return [self._redact_sensitive_data(item) for item in value]
+
+        if isinstance(value, tuple):
+            return tuple(self._redact_sensitive_data(item) for item in value)
+
+        return value
+
     def run_test(self, api_name, func, request_params=None):
         print(f"\n{'=' * 80}")
         print(f"TESTING: {api_name}")
         print(f"{'=' * 80}")
 
-        # Print request parameters if provided
+        # Print request metadata only (never request values) to avoid
+        # clear-text logging of credentials/secrets.
         if request_params:
             print("\nREQUEST:")
-            print(json.dumps(request_params, indent=2, default=str))
+            if isinstance(request_params, dict):
+                print(json.dumps({"param_keys": sorted(request_params.keys())}, indent=2, default=str))
+            else:
+                print(json.dumps({"request_type": type(request_params).__name__}, indent=2, default=str))
 
         start = time.perf_counter()
 
