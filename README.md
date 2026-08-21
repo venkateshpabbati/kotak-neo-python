@@ -20,6 +20,7 @@ Official Python SDK for Kotak Neo Trading APIs - a modern, well-tested trading c
 ✅ **SFeed WebSocket Streaming** - Modern async/await live market feed with typed messages, enriched with `trading_symbol`  
 ✅ **HTTP/2 Transport** - REST calls use HTTP/2 (via httpx) with automatic HTTP/1.1 fallback  
 ✅ **Optional Reliability Utilities** - Opt-in rate limiting, plus retry and circuit-breaker helpers  
+✅ **Enhanced Logging** - Rotating log file with REST/WebSocket tracking and automatic masking of sensitive data  
 ✅ **Comprehensive Error Handling** - Detailed exception hierarchy with input validation  
 ✅ **Type Safety** - Full mypy type checking support  
 ✅ **Extensive Testing** - 100% test coverage (unit, integration, and E2E tests)  
@@ -140,18 +141,21 @@ Detailed documentation for all SDK functions with examples and real API response
 **API Documentation:**
 - **[Complete API Reference](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/functions/README.md)** - All SDK functions
 - **[SFeed WebSocket Guide](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/guides/websocket.md)** - Async streaming client, protocol & migration
+- **[Logging Guide](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/guides/logging.md)** - `setup_logging()`, log levels & configuration
 - **[All Guides](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/guides/README.md)** - Complete guide index
 
 ## WebSocket Streaming Example (SFeed)
 
 Live market data is delivered through the modern async/await **SFeed** WebSocket
 client. It uses `async for` iteration and returns type-safe Pydantic messages,
-each enriched with its `trading_symbol` (resolved from the subscribe ack).
+each enriched with its `trading_symbol` (resolved from the subscribe ack) —
+except `SFeedMarketStatus`, which isn't tied to a specific instrument (see
+below).
 
 ```python
 import asyncio
 from neo_api_client import NeoAPI
-from neo_api_client.websocket.feed import WsToken, SFeedScrip
+from neo_api_client.websocket.feed import WsToken, SFeedScrip, SFeedMarketStatus
 
 
 async def main():
@@ -177,6 +181,21 @@ async def main():
 
 asyncio.run(main())
 ```
+
+Market status (open/close/pre-open/etc., not tied to a specific instrument) is a
+separate subscription — `subscribe_exchange()` takes no tokens and delivers
+`SFeedMarketStatus`:
+
+```python
+await ws.subscribe_exchange()
+
+async for message in ws:
+    if isinstance(message, SFeedMarketStatus):
+        print(f"status_code={message.status_code} status={message.status}")
+```
+
+See [Message Types](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/guides/websocket.md#message-types)
+in the guide for the full `MarketStatusCode` table.
 
 > **Note:** The SFeed client works out of the box — its dependencies
 > (`websockets`, `pydantic`) ship with the base install. The legacy callback-based
@@ -256,10 +275,6 @@ NEO_MOBILE_NUMBER=+919876543210
 # Your UCC (User Client Code) from NEO app Profile section
 NEO_UCC=YOUR_UCC
 
-# TOTP secret key (base32 string from QR code during TOTP registration)
-# This is NOT the 6-digit code - it's the secret key from authenticator setup
-NEO_TOTP_SECRET=YOUR_TOTP_SECRET_KEY
-
 # Your trading MPIN
 NEO_MPIN=123456
 ```
@@ -267,7 +282,8 @@ NEO_MPIN=123456
 **How to get credentials:**
 - **Consumer Key**: NEO app → More → Trade API → Generate application → Copy token
 - **UCC**: NEO app → Profile section
-- **TOTP Secret**: https://www.kotakneo.com/platform/kotak-neo-trade-api/ → Register for TOTP → Note the secret from QR code setup
+
+> TOTP is a 2FA factor and is intentionally not automated via a `.env` secret here — `totp_login()` expects the live 6-digit code. See [`tests/e2e/smoke_test.py`](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/tests/e2e/smoke_test.py) for an example that prompts for it (or optionally auto-generates it from a `NEO_TOTP_SECRET` you add to your own local `.env`, for faster local iteration only).
 
 
 
@@ -402,6 +418,11 @@ kotak-neo-python/
 - **Documentation**: [GitHub Docs](https://github.com/Kotak-Neo/kotak-neo-python/tree/main/docs)
 - **Issues**: [GitHub Issues](https://github.com/Kotak-Neo/kotak-neo-python/issues)
 - **Email**: support@kotakneo.com
+
+Reporting a bug? Enable file logging with `setup_logging(file_level="INFO")` (see the
+[Logging Guide](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/guides/logging.md)),
+reproduce the issue, and attach the resulting `logs/neo-api-client.log` to your issue —
+sensitive fields are already masked, so it's safe to share as-is.
 
 ## Contributing
 

@@ -258,7 +258,6 @@ runner = APITestRunner()
 try:
     MOBILE_NUMBER = config("NEO_MOBILE_NUMBER")
     UCC = config("NEO_UCC")
-    TOTP_SECRET = config("NEO_TOTP_SECRET")
     MPIN = config("NEO_MPIN")
 except Exception as e:
     print("\n" + "=" * 80)
@@ -268,26 +267,23 @@ except Exception as e:
     print("\nPlease ensure .env file exists with the following variables:")
     print("  - NEO_MOBILE_NUMBER")
     print("  - NEO_UCC")
-    print("  - NEO_TOTP_SECRET")
     print("  - NEO_MPIN")
     print("\nSee .env.example for template")
     print("=" * 80)
     exit(1)
 
-# Ask whether to auto-generate the TOTP from NEO_TOTP_SECRET (via pyotp) or
-# enter it manually. Automatic is the default; answer "y" to type it in by
-# hand instead (e.g. to test with a different authenticator/device).
-enter_totp_manually = input(
-    "\nEnter TOTP manually instead of auto-generating it? (y/N): "
-).strip().lower() in ("y", "yes")
+# NEO_TOTP_SECRET is optional (not in .env.example -- TOTP is a 2FA factor
+# and shouldn't be automated by default). If it's set in your own local
+# .env, the TOTP is auto-generated via pyotp; otherwise you're asked for it.
+TOTP_SECRET = config("NEO_TOTP_SECRET", default=None)
 
-if enter_totp_manually:
-    totp_code = input("Enter TOTP code: ").strip()
-    print(f"\n[MANUAL TOTP]: {totp_code}")
-else:
+if TOTP_SECRET:
     totp_generator = pyotp.TOTP(TOTP_SECRET)
     totp_code = totp_generator.now()
     print(f"\n[AUTO-GENERATED TOTP]: {totp_code}")
+else:
+    totp_code = input("\nNEO_TOTP_SECRET not set -- enter TOTP code: ").strip()
+    print(f"\n[MANUAL TOTP]: {totp_code}")
 
 totp_login_params = {
     "mobile_number": MOBILE_NUMBER,
@@ -518,7 +514,7 @@ search_scrip_response = runner.run_test(
     request_params={
         "exchange_segment": "bfo",
         "symbol": "sensex",
-        "expiry": "27AUG2026",
+        "expiry": "18AUG2026",
         "ignore_50multiple": False,
     },
 )
@@ -891,6 +887,84 @@ def _ws_unsubscribe_test(tokens, lite=False):
     return _test
 
 
+def _ws_market_subscribe_test():
+    """Connect, call subscribe_exchange() (no tokens), collect messages briefly."""
+
+    def _test():
+        async def _run():
+            runner.ws_messages.clear()
+            runner.ws_error = None
+
+            ws = runner.client.create_websocket()
+            ws.on_error = runner.on_ws_error
+            print(f"\n[WEBSOCKET URL] SFeed: {ws.url}")
+            _trace_ws_login(ws)
+
+            await ws.connect()
+            runner.ws_connected = ws.is_connected
+            _trace_ws_frames(ws)
+
+            await ws.subscribe_exchange()
+            print("\nSubscribed via subscribe_exchange() (no tokens)")
+
+            print("\nReceiving (5 seconds)...")
+            await _collect_for(ws, 5, on_message=runner.on_ws_message)
+
+            await ws.close()
+
+        asyncio.run(_run())
+
+        if runner.ws_error:
+            raise RuntimeError(f"WebSocket error: {runner.ws_error}")
+
+        return {
+            "subscribed": True,
+            "messages_received": len(runner.ws_messages),
+        }
+
+    return _test
+
+
+def _ws_market_unsubscribe_test():
+    """Call subscribe_exchange(), then unsubscribe_exchange(), confirm it goes quiet."""
+
+    def _test():
+        async def _run():
+            runner.ws_error = None
+
+            ws = runner.client.create_websocket()
+            ws.on_error = runner.on_ws_error
+            print(f"\n[WEBSOCKET URL] SFeed: {ws.url}")
+            _trace_ws_login(ws)
+
+            await ws.connect()
+            _trace_ws_frames(ws)
+
+            await ws.subscribe_exchange()
+            print("\nSubscribed via subscribe_exchange() - receiving briefly (3 seconds)...")
+            await _collect_for(ws, 3)
+
+            await ws.unsubscribe_exchange()
+            print("\nUnsubscribed - confirming feed goes quiet (3 seconds)...")
+            messages_after = await _collect_for(ws, 3)
+
+            await ws.close()
+            return messages_after
+
+        messages_after = asyncio.run(_run())
+
+        if runner.ws_error:
+            raise RuntimeError(f"WebSocket error: {runner.ws_error}")
+
+        print(f"\n[UNSUBSCRIBE] Messages received after unsubscribe: {messages_after}")
+        return {
+            "unsubscribed": True,
+            "messages_after_unsubscribe": messages_after,
+        }
+
+    return _test
+
+
 # LTP subscribe / unsubscribe (touchline feed)
 runner.run_test(
     "WEBSOCKET LTP SUBSCRIBE",
@@ -921,6 +995,19 @@ runner.run_test(
     "WEBSOCKET OPTION CHAIN UNSUBSCRIBE",
     _ws_unsubscribe_test(OPTION_CHAIN_TOKENS),
     request_params={"inputtoken": [t.inputtoken for t in OPTION_CHAIN_TOKENS]},
+)
+
+# subscribe_exchange() / unsubscribe_exchange() -- market status, no tokens
+runner.run_test(
+    "WEBSOCKET MARKET SUBSCRIBE",
+    _ws_market_subscribe_test(),
+    request_params={"event": "subscribeExchange"},
+)
+
+runner.run_test(
+    "WEBSOCKET MARKET UNSUBSCRIBE",
+    _ws_market_unsubscribe_test(),
+    request_params={"event": "unsubscribeExchange"},
 )
 
 # ---------------------------

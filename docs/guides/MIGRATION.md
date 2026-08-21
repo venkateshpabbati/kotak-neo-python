@@ -47,7 +47,7 @@ Example output:
 (environment, access_token, neo_fin_key, consumer_key); kotakneoapi is
 (consumer_key, environment, access_token, neo_fin_key). ...
 [ERROR] bot.py:21: cancel_cover_order(...): Removed in kotakneoapi. ...
-[WARNING] bot.py:8: place_order(...): parameter(s) [stop_loss_value, tag] no
+[WARNING] bot.py:8: place_order(...): parameter(s) [stop_loss_value, scrip_token] no
 longer exist in kotakneoapi and will raise TypeError. ...
 
 2 error(s), 1 warning(s) across 1 file(s).
@@ -151,12 +151,18 @@ client.place_order(..., product="CNC")  # or "NRML", "MIS", or "MTF"
 `place_order` and now raise a validation error. If your v2.0.2 code placed
 cover/bracket orders, that path is removed (see §5).
 
-The bracket/cover-order-only parameters `pf`, `tag`, `scrip_token`,
+The bracket/cover-order-only parameters `pf`, `scrip_token`,
 `square_off_type`, `stop_loss_type`, `stop_loss_value`, `square_off_value`,
 `last_traded_price`, `trailing_stop_loss`, and `trailing_sl_value` have been
 removed from `place_order()` along with that order type. Drop them from any
 call — passing them now raises `TypeError` (unexpected keyword argument)
 instead of being silently ignored.
+
+> **`tag` is a general-purpose parameter, not a bracket/cover-order one.**
+> `place_order(..., tag=...)` is supported: it's sent as `ig` and echoed back
+> as `GuiOrdId` in `order_report()`/`trade_report()`, for tracking an order
+> against your own system without depending on the exchange-assigned order
+> number.
 
 ### 3.2 Exchange segment — only the exact canonical codes are accepted
 
@@ -454,7 +460,9 @@ Key differences:
   `message.model_dump()` for a dict.
 - **`trading_symbol` included.** Each message carries a human-readable
   `trading_symbol` (resolved from the subscribe acknowledgement) alongside
-  `exchange_segment` and `instrument_token`.
+  `exchange_segment` and `instrument_token` — except `SFeedMarketStatus`
+  (from `subscribe_exchange()`), which has neither, since it isn't tied to a
+  specific instrument.
 - **Subscribe methods by data level:** `subscribe_scrips` (touch line),
   `subscribe_scrips_lite`, `subscribe_depth`, `subscribe_full_depth`,
   `subscribe_index` — each with a matching `unsubscribe_*`.
@@ -500,27 +508,11 @@ See **[Order Feed](../functions/websocket/order_feed.md)**.
   (`/quick/user/orders/<order_no>`); omit `order_id` for the full order book.
 - **`whatsmyip()`.** New method returning the client's outbound IP as seen by the
   server (useful for IP-whitelisting).
-- **No stdout printing from the library.** The old SDK printed warnings/errors to
-  stdout; the new SDK uses structured logging.
-- **Structured logging.** Quiet by default (`NEO_LOG_LEVEL` defaults to
-  `WARNING`, so routine per-request tracing stays silent) — set
-  `NEO_LOG_LEVEL=INFO` or `DEBUG` for more verbosity. Also configurable via
-  `NEO_LOG_JSON`.
-- **Rotating log file, on by default, covers REST *and* WebSocket.**
-  Warnings and errors — including WebSocket connect failures, disconnects,
-  reconnect attempts, authentication failures, and subscription errors for
-  both `SFeedWebSocket` and `OrderFeedWebSocket`, not just REST calls — are
-  written to `logs/neo-api-client.log` (relative to your working directory),
-  rotated daily with 7 days retained. Independent of the console level.
-  Configure via `NEO_LOG_FILE_ENABLED` (set to `false` to disable),
-  `NEO_LOG_FILE_PATH`, `NEO_LOG_FILE_LEVEL`, and `NEO_LOG_FILE_BACKUP_COUNT`.
-- **Programmatic control via `setup_logging(...)`.** Both `level` (console)
-  and `file_level` (file) also accept `"NOLOG"` to disable that output
-  entirely — e.g. `setup_logging(file_level="NOLOG")` stops file logging,
-  independent of the console. Call it directly (`from neo_api_client.logger
-  import setup_logging`) to reconfigure at runtime instead of via env vars;
-  each call fully replaces the previous configuration rather than adding to
-  it.
+- **Structured logging.** The old SDK printed warnings/errors to stdout; the
+  new SDK uses structured logging instead, on both REST and WebSocket
+  clients, with a rotating log file on by default. See the
+  [Logging Guide](logging.md) for `setup_logging(...)` usage, log levels,
+  and configuration.
 - **`limits()` takes no parameters.** It always requests limits across all
   segments, exchanges, and products. If you called `limits(segment=..., exchange=..., product=...)`,
   drop those arguments — `client.limits()` now covers everything in one call.
@@ -562,7 +554,7 @@ See **[Order Feed](../functions/websocket/order_feed.md)**.
 - [ ] Rewrite WebSocket code to the async `create_websocket()` / `create_order_feed()` model.
 - [ ] Replace `subscribe_to_orderfeed` and any cover/bracket cancel calls.
 - [ ] Drop `segment`/`exchange`/`product` from `limits()` and `market_protection` from `place_order`/`modify_order` calls.
-- [ ] Drop the bracket/cover-order-only `place_order()` params (`pf`, `tag`, `scrip_token`, `square_off_type`, `stop_loss_type`, `stop_loss_value`, `square_off_value`, `last_traded_price`, `trailing_stop_loss`, `trailing_sl_value`).
+- [ ] Drop the bracket/cover-order-only `place_order()` params (`pf`, `scrip_token`, `square_off_type`, `stop_loss_type`, `stop_loss_value`, `square_off_value`, `last_traded_price`, `trailing_stop_loss`, `trailing_sl_value`) — `tag` is not one of these; it's a supported general-purpose parameter (see §3.1).
 - [ ] Drop `instrument_token`, `exchange_segment`, `trading_symbol`, `transaction_type`, `product`, `dd`, and `filled_quantity` from `modify_order()` calls.
 - [ ] Don't pass `isVerify` to `modify_order()` — it was never a valid parameter there in either version (it only exists on `cancel_order()`/`cancel_cover_order()`/`cancel_bracket_order()`, see §3.8).
 - [ ] Replace `trade_report(order_id=...)` with `order_report(order_id=...)` for single-order lookups.
