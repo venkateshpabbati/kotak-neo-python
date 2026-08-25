@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kotakneoapi"
-version = "3.0.1"
+version = "3.0.2"
 description = "Official Python SDK for Kotak Neo Trading APIs"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -67,7 +67,7 @@ dev = [
     "pytest-cov>=7.0",
     "respx>=0.21",
     "coverage>=7.10",
-    "ruff==0.16.3",
+    "ruff==0.16.4",
     "mypy>=1.17",
     "build>=1.3.0",
     "twine>=6.0.0",
