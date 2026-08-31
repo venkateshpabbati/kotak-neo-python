@@ -121,6 +121,28 @@ def test_add_app_context_processor():
     assert "environment" in result
 
 
+def test_add_app_context_defaults_to_unknown_without_set_environment():
+    """No set_environment() call yet -> falls back to NEO_ENVIRONMENT/'unknown'."""
+    event_dict = {"message": "test"}
+
+    result = add_app_context(None, None, event_dict)
+
+    assert result["environment"] == "unknown"
+
+
+def test_set_environment_is_visible_via_merge_contextvars():
+    """set_environment() binds a contextvar that merge_contextvars puts into
+    the event dict before add_app_context runs -- so real client config
+    (e.g. "prod"/"uat") shows up instead of the 'unknown' fallback."""
+    from neo_api_client.logger import set_environment
+
+    set_environment("prod")
+    event_dict = structlog.contextvars.merge_contextvars(None, None, {"message": "test"})
+    result = add_app_context(None, None, event_dict)
+
+    assert result["environment"] == "prod"
+
+
 def test_setup_logging_default():
     """Test setup_logging with default parameters."""
     logger = setup_logging()
@@ -287,6 +309,23 @@ def test_file_logging_failure_is_swallowed_not_raised(tmp_path, monkeypatch):
         isinstance(h, logging.handlers.TimedRotatingFileHandler)
         for h in logging.getLogger().handlers
     )
+
+
+def test_file_logging_with_bare_filename_skips_makedirs(tmp_path, monkeypatch):
+    """A file_path with no directory component (e.g. "app.log", written to
+    the current working directory) has no parent_dir to create -- os.makedirs
+    must not be called, and the file still gets created."""
+    monkeypatch.chdir(tmp_path)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("os.makedirs should not be called for a bare filename")
+
+    monkeypatch.setattr("os.makedirs", _boom)
+
+    setup_logging(file_enabled=True, file_path="bare.log")
+    get_logger("test_bare_filename").warning("written_next_to_cwd")
+
+    assert (tmp_path / "bare.log").exists()
 
 
 def test_default_file_path_is_hyphenated():

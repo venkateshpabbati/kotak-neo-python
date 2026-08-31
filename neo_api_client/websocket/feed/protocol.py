@@ -11,8 +11,11 @@ import struct
 
 from neo_api_client.websocket.feed.models import (
     EXCHANGE_ID_TO_NAME,
+    MARKET_STATUS_TEXT,
     DepthLevel,
     Level,
+    MarketStatusCode,
+    SFeedCasChange,
     SFeedIndex,
     SFeedMarketStatus,
     SFeedScrip,
@@ -33,6 +36,16 @@ MSG_MARKET_OPEN = 6511
 MSG_MARKET_CLOSE = 6521
 MSG_INDEX = 7207
 MSG_MARKET_PICTURE = 7208
+# Market status, delivered while subscribed via subscribe_exchange() /
+# unsubscribe_exchange() (event names "subscribeExchange"/"unsubscribeExchange").
+# Same SFeedMarketStatus model as MSG_MARKET_OPEN/MSG_MARKET_CLOSE above, just
+# with an actual body (status_code + status string) instead of relying on the
+# message_code alone.
+MSG_MARKET_STATUS = 105
+# Call auction session (CAS) reference-price/imbalance update, delivered
+# while subscribed via subscribe_scrips()/subscribe_depth() (per-instrument,
+# not a separate subscription). Confirmed by the WebSocket team.
+MSG_CAS_CHANGE = 104
 
 # Struct layouts (all little-endian, packed). Bodies start at HEADER_SIZE (@9).
 # Header: message_length u16, message_code u16, exchange_id i8, level u8,
@@ -57,6 +70,13 @@ _MP_FIXED_END = 144
 # DepthRow: qty(i64), price(i32), number_of_orders(i32)  => 16 bytes
 _DEPTH_ROW = struct.Struct("<qii")
 _DEPTH_ROW_SIZE = 16
+
+# Market status body (@9): status_code(u16), status[5]  => 7 bytes (total packet 16)
+_MARKET_STATUS_BODY = struct.Struct("<H5s")
+
+# CasChange body (@9): stk_exch_token(u32), ref_price(u32), imbalance_qty(i64),
+# imbalance_qty_at_market(i64)  => 24 bytes (total packet 33)
+_CAS_CHANGE_BODY = struct.Struct("<IIqq")
 
 
 def split_batch(frame: bytes) -> list[bytes]:
@@ -110,16 +130,27 @@ def decode_packet(packet: bytes, dividers: dict[int, int]):
 
     # Route by message_code first (per spec), then fall back to level.
     if message_code in (MSG_MARKET_OPEN, MSG_MARKET_CLOSE):
-        # instrument_token is empty here (market-status frames carry no token);
-        # it is not a credential despite bandit's password heuristic.
+        # No body on these -- synthesize status_code to line up with
+        # MarketStatusCode.BCAST_OPEN_MESSAGE/BCAST_CLOSE_MESSAGE (1/2).
+        status_code = (
+            MarketStatusCode.BCAST_OPEN_MESSAGE
+            if message_code == MSG_MARKET_OPEN
+            else MarketStatusCode.BCAST_CLOSE_MESSAGE
+        )
         return SFeedMarketStatus(
             exchange_segment=exchange,
-            instrument_token="",  # nosec B106
-            status="open" if message_code == MSG_MARKET_OPEN else "close",
+            status_code=status_code,
+            status=MARKET_STATUS_TEXT[status_code],
         )
 
     if message_code == MSG_INDEX:
         return _decode_index(packet, exchange, divider)
+
+    if message_code == MSG_MARKET_STATUS:
+        return _decode_market_status(packet, exchange)
+
+    if message_code == MSG_CAS_CHANGE:
+        return _decode_cas_change(packet, exchange, divider)
 
     # Market-data packets are routed by the level byte (not message_code).
     if level == Level.MINI_TOUCH_LINE:
@@ -166,6 +197,56 @@ def _decode_index(packet: bytes, exchange: str, divider: int) -> SFeedIndex:
         last_trade_time=last_trade_time,
         precision=precision,
         multiplier=multiplier / divider,
+    )
+
+
+def _decode_market_status(packet: bytes, exchange: str) -> SFeedMarketStatus:
+    """message_code 105 -- has a real body (status_code + a 5-byte status
+    string), unlike the header-only MSG_MARKET_OPEN/MSG_MARKET_CLOSE.
+    status_code is passed through as-is (see MarketStatusCode for what it
+    means). status is looked up from the static MARKET_STATUS_TEXT mapping,
+    not the raw wire string -- the wire string is unreliable (the live feed
+    sends an empty string for most codes other than 1). Falls back to the
+    wire string, then a placeholder, only for a status_code not yet in the
+    mapping.
+    """
+    status_code, status_bytes = _MARKET_STATUS_BODY.unpack_from(packet, HEADER_SIZE)
+
+    status_text = MARKET_STATUS_TEXT.get(status_code)
+    if status_text is None:
+        status_text = _decode_string(status_bytes) or f"Unknown status_code {status_code}"
+
+    return SFeedMarketStatus(
+        exchange_segment=exchange,
+        status_code=status_code,
+        status=status_text,
+    )
+
+
+def _decode_cas_change(packet: bytes, exchange: str, divider: int) -> SFeedCasChange | None:
+    """message_code 104 -- call auction session (CAS) reference-price and
+    order-imbalance update. Arrives per-instrument on subscribe_scrips()/
+    subscribe_depth() (not a separate subscription).
+
+    Only meaningful during the CAS window -- outside it, the exchange still
+    broadcasts this packet but with ref_price, imbalance_qty, and
+    imbalance_qty_at_market all zero, which carries no real information.
+    Dropped (returns None) in that case rather than delivering a message
+    with nothing useful in it.
+    """
+    stk_exch_token, ref_price, imbalance_qty, imbalance_qty_at_market = (
+        _CAS_CHANGE_BODY.unpack_from(packet, HEADER_SIZE)
+    )
+
+    if ref_price == 0 and imbalance_qty == 0 and imbalance_qty_at_market == 0:
+        return None
+
+    return SFeedCasChange(
+        exchange_segment=exchange,
+        instrument_token=str(stk_exch_token),
+        ref_price=ref_price / divider,
+        imbalance_qty=imbalance_qty,
+        imbalance_qty_at_market=imbalance_qty_at_market,
     )
 
 
@@ -236,6 +317,13 @@ def _decode_market_picture(
         precision,
         multiplier,
     ) = _MP_BODY.unpack_from(packet, HEADER_SIZE)
+
+    # A never-updated instrument sends this as a negative sentinel (the
+    # exchange's "blank" placeholder -- 1900-01-01 00:00:00 IST expressed as
+    # a signed Unix timestamp) rather than 0 like last_trade_time uses for
+    # the same "no value yet" case. Normalize both to the same convention.
+    if last_update_time < 0:
+        last_update_time = 0
 
     # Touch line (level 4) always carries exactly 1 bid + 1 ask.
     if level == Level.TOUCH_LINE:

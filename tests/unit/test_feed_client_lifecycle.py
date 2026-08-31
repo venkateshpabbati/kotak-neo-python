@@ -19,6 +19,7 @@ from neo_api_client.websocket.feed import client as _client_mod  # noqa: E402
 from neo_api_client.websocket.feed.exceptions import NotConnectedError  # noqa: E402
 from neo_api_client.websocket.feed.protocol import (  # noqa: E402
     HEADER_SIZE,
+    MSG_CAS_CHANGE,
     MSG_MARKET_OPEN,
     MSG_MARKET_PICTURE,
 )
@@ -36,6 +37,17 @@ _DEPTH_ROW = struct.Struct("<qii")
 
 def _market_status_frame():
     return struct.Struct("<HHbBBBB").pack(HEADER_SIZE, MSG_MARKET_OPEN, 1, 0, 0, 0, 0)
+
+
+def _cas_change_frame(token, ref_price_paise, imbalance_qty=0, imbalance_qty_at_market=0):
+    """A message_code 104 (CAS reference-price/imbalance) frame for `token`,
+    decodes to nse_cm|<token> -- same instrument-token shape as scrip/depth,
+    so trading_symbol enrichment applies to it too."""
+    body = struct.Struct("<IIqq").pack(
+        token, ref_price_paise, imbalance_qty, imbalance_qty_at_market
+    )
+    header = struct.Struct("<HHbBBBB").pack(HEADER_SIZE + len(body), MSG_CAS_CHANGE, 1, 0, 0, 0, 0)
+    return header + body
 
 
 def _mini_frame(token, last_traded_price_paise):
@@ -321,6 +333,38 @@ def test_authenticate_timeout(monkeypatch):
         asyncio.run(run())
 
 
+def test_connect_authenticate_subscribe_unsubscribe_log_at_info(monkeypatch):
+    """Successful connect/auth/subscribe/unsubscribe are visible at INFO --
+    a customer running at the recommended INFO level (not the SDK-internal
+    DEBUG level) must see confirmation the feed is healthy, not just errors."""
+
+    async def run():
+        fake = FakeAsyncWS(incoming=[_AUTH_OK])
+        _patch_connect(monkeypatch, fake)
+
+        logged_events = []
+        orig_info = _client_mod.logger.info
+
+        def capture_info(event, **kwargs):
+            logged_events.append(event)
+            return orig_info(event, **kwargs)
+
+        monkeypatch.setattr(_client_mod.logger, "info", capture_info)
+
+        ws = SFeedWebSocket(url="wss://fake/feed", ack_wait_timeout=0.05)
+        await ws.connect()
+        await ws.subscribe_scrips([WsToken("nse_cm", "11536")])
+        await ws.unsubscribe_scrips([WsToken("nse_cm", "11536")])
+        await ws.close()
+        return logged_events
+
+    logged_events = asyncio.run(run())
+    assert "sfeed_connected" in logged_events
+    assert "sfeed_authenticated" in logged_events
+    assert "sfeed_subscribed" in logged_events
+    assert "sfeed_unsubscribed" in logged_events
+
+
 def test_subscribe_over_live_connection(monkeypatch):
     """Subscribe/unsubscribe send frames over a live (fake) connection."""
 
@@ -354,6 +398,153 @@ def test_subscribe_over_live_connection(monkeypatch):
     assert "unsubscribeDepth" in events
     assert "unsubscribeFullDepth" in events
     assert "unsubscribeIndices" in events
+
+
+def test_subscribe_exchange_sends_frame_with_no_tokens(monkeypatch):
+    """subscribe_exchange/unsubscribe_exchange take no arguments and send a
+    plain {"event": ...} frame -- no inputtoken field at all."""
+
+    async def run():
+        fake = FakeAsyncWS(incoming=[_AUTH_OK])
+        _patch_connect(monkeypatch, fake)
+        ws = SFeedWebSocket(url="wss://fake/feed")
+        await ws.connect()
+
+        await ws.subscribe_exchange()
+        await ws.unsubscribe_exchange()
+
+        frames = [json.loads(s) for s in fake.sent if s.startswith("{") and "event" in s]
+        await ws.close()
+        return frames
+
+    frames = asyncio.run(run())
+    sub_frame = next(f for f in frames if f["event"] == "subscribeExchange")
+    unsub_frame = next(f for f in frames if f["event"] == "unsubscribeExchange")
+    assert sub_frame == {"event": "subscribeExchange"}
+    assert unsub_frame == {"event": "unsubscribeExchange"}
+
+
+def test_subscribe_exchange_raises_when_not_connected():
+    ws = SFeedWebSocket(url="wss://fake/feed")
+
+    async def run():
+        await ws.subscribe_exchange()
+
+    with pytest.raises(NotConnectedError):
+        asyncio.run(run())
+
+
+def test_unsubscribe_exchange_raises_when_not_connected():
+    ws = SFeedWebSocket(url="wss://fake/feed")
+
+    async def run():
+        await ws.unsubscribe_exchange()
+
+    with pytest.raises(NotConnectedError):
+        asyncio.run(run())
+
+
+def test_subscribe_exchange_send_failure_wrapped(monkeypatch):
+    """A send failure during subscribe_exchange() is wrapped as SubscriptionError."""
+    from neo_api_client.websocket.feed.exceptions import SubscriptionError
+
+    async def run():
+        fake = FakeAsyncWS(incoming=[_AUTH_OK])
+        _patch_connect(monkeypatch, fake)
+        ws = SFeedWebSocket(url="wss://fake/feed")
+        await ws.connect()
+
+        async def boom(*a, **k):
+            raise RuntimeError("send broke")
+
+        ws._ws.send = boom
+        try:
+            await ws.subscribe_exchange()
+        finally:
+            ws._connected = False
+
+    with pytest.raises(SubscriptionError, match="Failed to subscribe"):
+        asyncio.run(run())
+
+
+def test_unsubscribe_exchange_send_failure_wrapped(monkeypatch):
+    """A send failure during unsubscribe_exchange() is wrapped as SubscriptionError."""
+    from neo_api_client.websocket.feed.exceptions import SubscriptionError
+
+    async def run():
+        fake = FakeAsyncWS(incoming=[_AUTH_OK])
+        _patch_connect(monkeypatch, fake)
+        ws = SFeedWebSocket(url="wss://fake/feed")
+        await ws.connect()
+
+        async def boom(*a, **k):
+            raise RuntimeError("send broke")
+
+        ws._ws.send = boom
+        try:
+            await ws.unsubscribe_exchange()
+        finally:
+            ws._connected = False
+
+    with pytest.raises(SubscriptionError, match="Failed to unsubscribe"):
+        asyncio.run(run())
+
+
+@pytest.mark.parametrize("method_name", ["subscribe_exchange", "unsubscribe_exchange"])
+@pytest.mark.parametrize(
+    "call_args,call_kwargs",
+    [
+        (("nse_cm|11536",), {}),
+        ((), {"tokens": ["nse_cm|11536"]}),
+        ((), {"inputtoken": "nse_cm|11536"}),
+    ],
+)
+def test_subscribe_exchange_rejects_any_argument(method_name, call_args, call_kwargs):
+    """subscribe_exchange()/unsubscribe_exchange() take no arguments at all --
+    a caller must not be able to pass tokens/inputtoken (or anything else),
+    positionally or by keyword. Enforced by Python's own call signature, not
+    just by convention -- this locks that in with a regression test."""
+    ws = SFeedWebSocket(url="wss://fake/feed")
+    method = getattr(ws, method_name)
+
+    with pytest.raises(TypeError):
+        method(*call_args, **call_kwargs)
+
+
+def test_reconnect_resends_subscribe_exchange(monkeypatch):
+    """After a reconnect, subscribe_exchange is re-sent same as per-token
+    subscriptions -- the server forgets it on close, same as everything else."""
+    import websockets
+
+    async def run():
+        class ClosingWS(FakeAsyncWS):
+            async def recv(self):
+                if self._incoming:
+                    return self._incoming.pop(0)
+                raise websockets.exceptions.ConnectionClosed(None, None)
+
+        first = ClosingWS(incoming=[_AUTH_OK])
+        second = FakeAsyncWS(incoming=[_AUTH_OK])
+        sockets = [first, second]
+
+        async def fake_connect(url, **kwargs):
+            return sockets.pop(0)
+
+        monkeypatch.setattr(_client_mod.websockets, "connect", fake_connect)
+
+        ws = SFeedWebSocket(url="wss://fake/feed", reconnect_delay=0, max_reconnect_attempts=2)
+        await ws.connect()
+        await ws.subscribe_exchange()
+
+        # Let the receive loop hit ConnectionClosed and reconnect.
+        await asyncio.sleep(0.05)
+
+        resent = [s for s in second.sent if "subscribeExchange" in s]
+        await ws.close()
+        return resent
+
+    resent = asyncio.run(run())
+    assert len(resent) >= 1
 
 
 def test_reconnect_resubscribes(monkeypatch):
@@ -432,8 +623,8 @@ def test_feed_module_reexports():
 
 def test_to_websocket_scheme_https_becomes_wss():
     assert (
-        _client_mod._to_websocket_scheme("https://sfeed.kotaksecurities.com/betafeed")
-        == "wss://sfeed.kotaksecurities.com/betafeed"
+        _client_mod._to_websocket_scheme("https://sfeed.kotaksecurities.com/apifeed")
+        == "wss://sfeed.kotaksecurities.com/apifeed"
     )
 
 
@@ -453,8 +644,8 @@ def test_to_websocket_scheme_preserves_query_string():
 
 def test_sfeed_websocket_normalizes_https_url_to_wss():
     """A config-service-style https:// URL is usable directly by SFeedWebSocket."""
-    ws = SFeedWebSocket(url="https://sfeed.kotaksecurities.com/betafeed")
-    assert ws.url == "wss://sfeed.kotaksecurities.com/betafeed"
+    ws = SFeedWebSocket(url="https://sfeed.kotaksecurities.com/apifeed")
+    assert ws.url == "wss://sfeed.kotaksecurities.com/apifeed"
 
 
 # ---- TLS verification -------------------------------------------------------
@@ -948,17 +1139,17 @@ def test_index_trading_symbol_resolved_by_name_not_instrument_token():
     assert ws._trading_symbol_for(other) is None
 
 
-def test_binary_frame_stamps_trading_symbol_on_enqueued_message(monkeypatch):
-    """A decoded binary message gets trading_symbol set from the map before
-    being enqueued (end-to-end enrich path)."""
+def test_market_status_frame_never_gets_trading_symbol_enrichment(monkeypatch):
+    """SFeedMarketStatus has no trading_symbol field at all -- even if a
+    coincidental map entry exists at the same "exchange|" (empty token) key
+    a lookup would use, enrichment must be skipped entirely, not attempted
+    (attempting it would crash: there's no attribute to set)."""
 
     async def run():
         fake = FakeAsyncWS(incoming=[_AUTH_OK])
         _patch_connect(monkeypatch, fake)
         ws = SFeedWebSocket(url="wss://fake/feed")
         await ws.connect()
-        # The market-status frame decodes to exchange nse_cm with an empty token,
-        # so its map key is "nse_cm|".
         ws._trading_symbols = {"nse_cm|": "MARKET-STATUS"}
         ws._handle_binary_frame(_market_status_frame())
         msg = await asyncio.wait_for(ws._message_queue.get(), timeout=1.0)
@@ -966,7 +1157,78 @@ def test_binary_frame_stamps_trading_symbol_on_enqueued_message(monkeypatch):
         return msg
 
     msg = asyncio.run(run())
-    assert msg.trading_symbol == "MARKET-STATUS"
+    assert msg.type == "market_status"
+    assert not hasattr(msg, "trading_symbol")
+
+
+def test_scrip_message_with_unresolved_symbol_delivered_with_none(monkeypatch):
+    """A non-market-status message with no matching entry in
+    _trading_symbols (e.g. delivered outside any ack-wait window, or for a
+    token no ack ever covered) is still delivered -- trading_symbol just
+    stays at its default None, the assignment is skipped rather than forced."""
+
+    async def run():
+        fake = FakeAsyncWS(incoming=[_AUTH_OK])
+        _patch_connect(monkeypatch, fake)
+        ws = SFeedWebSocket(url="wss://fake/feed")
+        await ws.connect()
+        assert ws._trading_symbols == {}
+        ws._handle_binary_frame(_mini_frame(11536, 150050))
+        msg = await asyncio.wait_for(ws._message_queue.get(), timeout=1.0)
+        await ws.close()
+        return msg
+
+    msg = asyncio.run(run())
+    assert msg.type == "scrip_lite"
+    assert msg.trading_symbol is None
+
+
+def test_cas_change_frame_gets_trading_symbol_enrichment(monkeypatch):
+    """SFeedCasChange has a real instrument_token (unlike SFeedMarketStatus),
+    so it goes through the normal trading_symbol enrichment path -- no
+    special-casing needed, unlike _deliver_message's SFeedMarketStatus skip."""
+
+    async def run():
+        fake = FakeAsyncWS(incoming=[_AUTH_OK])
+        _patch_connect(monkeypatch, fake)
+        ws = SFeedWebSocket(url="wss://fake/feed")
+        await ws.connect()
+        ws._trading_symbols = {"nse_cm|1333": "RELIANCE-EQ"}
+        ws._handle_binary_frame(_cas_change_frame(1333, 72005, 1500, 250))
+        msg = await asyncio.wait_for(ws._message_queue.get(), timeout=1.0)
+        await ws.close()
+        return msg
+
+    msg = asyncio.run(run())
+    assert msg.type == "cas_change"
+    assert msg.instrument_token == "1333"
+    assert msg.trading_symbol == "RELIANCE-EQ"
+    assert msg.ref_price == pytest.approx(720.05)
+    assert msg.imbalance_qty == 1500
+    assert msg.imbalance_qty_at_market == 250
+
+
+def test_all_zero_cas_change_frame_never_reaches_queue(monkeypatch):
+    """Outside the CAS window the exchange still broadcasts this packet but
+    with everything zeroed -- must be dropped end-to-end (never delivered),
+    not just decoded-then-ignored. Verified by sending a real frame right
+    after it and confirming that's the ONLY thing that comes out the queue."""
+
+    async def run():
+        fake = FakeAsyncWS(incoming=[_AUTH_OK])
+        _patch_connect(monkeypatch, fake)
+        ws = SFeedWebSocket(url="wss://fake/feed")
+        await ws.connect()
+        ws._handle_binary_frame(_cas_change_frame(1333, 0, 0, 0))  # all zero -- dropped
+        ws._handle_binary_frame(_mini_frame(11536, 150050))  # real data -- delivered
+        msg = await asyncio.wait_for(ws._message_queue.get(), timeout=1.0)
+        assert ws._message_queue.empty()  # nothing else queued -- the zero frame was dropped
+        await ws.close()
+        return msg
+
+    msg = asyncio.run(run())
+    assert msg.type == "scrip_lite"
+    assert msg.instrument_token == "11536"
 
 
 def test_data_frame_ahead_of_ack_is_withheld_then_delivered_enriched(monkeypatch):
@@ -1061,7 +1323,7 @@ def test_binary_frame_delivered_immediately_after_ack_deadline_passes(monkeypatc
         return msg
 
     msg = asyncio.run(run())
-    assert msg.trading_symbol is None  # no ack ever populated the map
+    assert msg.type == "market_status"  # delivered successfully, not stuck withheld
 
 
 def test_dual_feed_same_instrument_both_delivered_during_ack_wait(monkeypatch):
@@ -1119,7 +1381,10 @@ def test_dual_feed_same_instrument_both_delivered_during_ack_wait(monkeypatch):
         return delivered_types, remaining
 
     delivered_types, remaining = asyncio.run(run())
-    assert delivered_types == {("market_status", "open"), ("market_status", "close")}
+    assert delivered_types == {
+        ("market_status", "Market open"),
+        ("market_status", "Market closed"),
+    }
     remaining_types = {msg.type for msg in remaining}
     assert remaining_types == {"scrip", "scrip_lite"}
     assert all(msg.trading_symbol == "RELIANCE-EQ" for msg in remaining)

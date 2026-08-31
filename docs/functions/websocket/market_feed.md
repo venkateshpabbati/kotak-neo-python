@@ -49,6 +49,16 @@ asyncio.run(main())
 | `subscribe_depth(tokens)` | Depth | `SFeedScrip` with `buy`/`sell` rows |
 | `subscribe_full_depth(tokens)` | Full depth | `SFeedScrip` with `buy`/`sell` rows |
 | `subscribe_index(tokens)` | Index | `SFeedIndex` |
+| `subscribe_exchange()` | Market status (no tokens) | `SFeedMarketStatus` |
+
+`subscribe_scrips(tokens)` and `subscribe_depth(tokens)` may also deliver
+`SFeedCasChange` (call auction session reference-price/order-imbalance
+updates, message code 104) for the same tokens — not a separate
+subscription. Outside the CAS window this arrives with `ref_price`,
+`imbalance_qty`, and `imbalance_qty_at_market` all zero; the SDK drops that
+case, so you only ever see it with real data. See
+[Message Types → `SFeedCasChange`](../../guides/websocket.md#sfeedcaschange)
+in the guide.
 
 ### LTP (single instrument)
 
@@ -64,6 +74,25 @@ All tokens are sent in a single frame (`inputtoken` becomes a comma-separated li
 chain = [WsToken("nse_fo", str(t)) for t in range(44498, 44520)]
 await ws.subscribe_scrips(chain)
 ```
+
+### Market status (no tokens)
+
+`subscribe_exchange()` takes no arguments at all — not tokens, not an
+`inputtoken` (passing any argument raises `TypeError`). It sends a single
+`{"event": "subscribeExchange"}` frame and delivers `SFeedMarketStatus`:
+
+```python
+await ws.subscribe_exchange()
+
+async for message in ws:
+    if isinstance(message, SFeedMarketStatus):
+        print(f"status_code={message.status_code} status={message.status}")
+```
+
+`status` is a static, human-readable string (e.g. `"Market open"`) looked up by
+`status_code` — not the raw wire text, which is unreliable in practice. See
+[Message Types → `SFeedMarketStatus`](../../guides/websocket.md#sfeedmarketstatus)
+in the guide for the full `status_code` table.
 
 ### Subscription limit
 
@@ -93,6 +122,7 @@ await ws.unsubscribe_scrips(tokens)
 | `unsubscribe_depth(tokens)` | Depth feed |
 | `unsubscribe_full_depth(tokens)` | Full-depth feed |
 | `unsubscribe_index(tokens)` | Index feed |
+| `unsubscribe_exchange()` | Market status feed |
 
 ### LTP (single instrument)
 
@@ -109,6 +139,15 @@ On the wire the unsubscribe frame omits the `json` field:
 chain = [WsToken("nse_fo", str(t)) for t in range(44498, 44520)]
 await ws.unsubscribe_scrips(chain)  # one batched frame
 ```
+
+### Market status (no tokens)
+
+```python
+await ws.unsubscribe_exchange()
+```
+
+Like `subscribe_exchange()`, this takes no arguments — sends a single
+`{"event": "unsubscribeExchange"}` frame.
 
 ## Parameters
 
@@ -128,14 +167,16 @@ For indices, use the index name as the token, e.g.
 ## Return type
 
 Messages are typed Pydantic models (`SFeedScrip`, `SFeedScripLite`, `SFeedIndex`,
-`SFeedMarketStatus`). All prices are pre-scaled by the per-exchange divider. Call
-`message.model_dump()` for a dict.
+`SFeedCasChange`, `SFeedMarketStatus`). All prices are pre-scaled by the per-exchange
+divider. Call `message.model_dump()` for a dict.
 
-Every message includes `exchange_segment`, `instrument_token`, and
-`trading_symbol`. The `trading_symbol` (e.g. `"RELIANCE-EQ"`) is resolved from the
-subscribe acknowledgement and is `None` until that ack arrives or if the server
-returned no symbol for the token. See the
+Every message includes `exchange_segment`. `SFeedScrip`/`SFeedScripLite`/`SFeedIndex`/
+`SFeedCasChange` also include `instrument_token` and `trading_symbol` — the `trading_symbol` (e.g.
+`"RELIANCE-EQ"`) is resolved from the subscribe acknowledgement and is `None` until
+that ack arrives or if the server returned no symbol for the token. See the
 [Trading symbol](../../guides/websocket.md#trading-symbol) section of the guide.
+`SFeedMarketStatus` has neither field — it isn't tied to a specific instrument, so
+it only carries `exchange_segment`, `status_code`, and `status`.
 
 ## Complete example (subscribe → receive → unsubscribe)
 

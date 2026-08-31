@@ -3,6 +3,8 @@ from __future__ import annotations
 import inspect
 from typing import TYPE_CHECKING, Any, NoReturn
 
+import httpx
+
 from neo_api_client import req_data_validation, settings
 from neo_api_client.api_client import ApiClient
 from neo_api_client.services.client_ip import ClientIpAPI
@@ -93,6 +95,10 @@ class NeoAPI:
         environment: str = "prod",
         access_token: str | None = None,
         neo_fin_key: str | None = None,
+        transport: httpx.BaseTransport | None = None,
+        limits: httpx.Limits | None = None,
+        http2: bool = True,
+        timeout: float | None = None,
     ) -> None:
         """
         Initializes the NeoAPI client with authentication credentials.
@@ -107,6 +113,21 @@ class NeoAPI:
                 Default: None (use TOTP authentication flow instead)
             neo_fin_key (str, optional): Financial key for tracking purpose.
                 Default: None
+            transport (httpx.BaseTransport, optional): Custom transport for the underlying
+                REST client -- the migration hook for deployment architectures that need a
+                corporate proxy, mTLS, custom connection pooling, or request/response
+                instrumentation (the httpx equivalent of mounting a custom
+                `requests.adapters.HTTPAdapter` on a `requests.Session`).
+                Default: None (httpx's standard transport)
+            limits (httpx.Limits, optional): Custom connection pool limits. Ignored if
+                `transport` is given, since a custom transport owns its own pooling.
+                Default: None (max_connections=20, max_keepalive_connections=10)
+            http2 (bool, optional): Whether to negotiate HTTP/2 (with automatic HTTP/1.1
+                fallback) on the default transport. Ignored if `transport` is given.
+                Default: True
+            timeout (float, optional): Default request timeout in seconds. Individual
+                calls made through the REST client can still override this per-call.
+                Default: None (30 seconds)
 
         WebSocket Callbacks:
             You can set these callback functions after initialization:
@@ -141,7 +162,9 @@ class NeoAPI:
                 # consumer_key=consumer_key, consumer_secret=consumer_secret,
                 host=environment
             )
-            self.api_client = ApiClient(self.configuration)
+            self.api_client = ApiClient(
+                self.configuration, transport=transport, limits=limits, http2=http2, timeout=timeout
+            )
             # try:
             #     session_init = neo_api_client.LoginAPI(self.api_client).session_init()
             #     print(json.dumps({"data": session_init}))
@@ -150,7 +173,9 @@ class NeoAPI:
         else:
             # access_token was provided.
             self.configuration = NeoUtility(access_token=access_token, host=environment)
-            self.api_client = ApiClient(self.configuration)
+            self.api_client = ApiClient(
+                self.configuration, transport=transport, limits=limits, http2=http2, timeout=timeout
+            )
 
         self.NeoWebSocket = None
         self.configuration.neo_fin_key = neo_fin_key
@@ -169,6 +194,7 @@ class NeoAPI:
         amo: str = "NO",
         disclosed_quantity: str = "0",
         trigger_price: str | None = "0",
+        tag: str | None = None,
     ) -> dict[str, Any]:
         """
         Places an order on the specified exchange segment and product, for a given trading symbol, transaction type,
@@ -186,6 +212,8 @@ class NeoAPI:
         amo (str, optional): Flag to indicate whether it is an AMO order. Defaults to "NO".
         disclosed_quantity (str, optional): Disclosed quantity for the order. Defaults to "0".
         trigger_price (str, optional): Trigger price for Stop Loss orders. Defaults to "0".
+        tag (str, optional): Caller-defined marker for tracking this order — echoed back
+            as "GuiOrdId" in order_report()/trade_report(). Defaults to None.
 
         Note:
         Market protection ("mp") is always sent as "0" — it is not caller-configurable.
@@ -205,6 +233,7 @@ class NeoAPI:
                     validity,
                     trading_symbol,
                     transaction_type,
+                    tag=tag,
                 )
 
                 exchange_segment = settings.exchange_segment[exchange_segment]
@@ -228,6 +257,7 @@ class NeoAPI:
                     amo=amo,
                     disclosed_quantity=disclosed_quantity,
                     trigger_price=trigger_price,
+                    tag=tag,
                 )
 
                 return place_order

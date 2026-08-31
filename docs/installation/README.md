@@ -4,6 +4,12 @@ Complete installation guides for kotakneoapi SDK across different platforms and 
 
 > **Quick install:** `pip install kotakneoapi` — see [Quick Start](#-quick-start-any-platform) below.
 > Contributing to the SDK itself? See **[Local Installation Guide](./local-install.md)**.
+>
+> **Upgrading from the legacy `neo-api-client` package?** It shares this
+> package's import name (`neo_api_client`) — `pip uninstall neo-api-client`
+> before installing `kotakneoapi`, or use a fresh virtual environment. See
+> [Migration Guide §1.1](../guides/MIGRATION.md#11-package-coexistence-and-rollback)
+> for the full explanation and a rollback procedure.
 
 ## 📚 Installation Guides by Platform
 
@@ -166,12 +172,14 @@ NEO_MOBILE_NUMBER=+919876543210
 # Your UCC from NEO app Profile
 NEO_UCC=ABC123
 
-# TOTP secret from QR code during TOTP registration
-NEO_TOTP_SECRET=your-base32-secret
-
 # Your trading MPIN
 NEO_MPIN=123456
 ```
+
+> TOTP is a 2FA factor and is intentionally not stored in `.env` here — pass the live
+> 6-digit code from your authenticator app to `totp_login(totp=...)` each time. (You
+> can optionally add a `NEO_TOTP_SECRET` to your own local `.env` for faster iteration
+> and auto-generate the code with `pyotp`, but don't commit or share that secret.)
 
 ### How to Get Each Credential:
 
@@ -183,12 +191,6 @@ NEO_MPIN=123456
 
 **NEO_UCC**
 - Find in NEO app under **Profile** section
-
-**NEO_TOTP_SECRET**
-1. Visit https://www.kotaksecurities.com/platform/kotak-neo-trade-api/
-2. Register for TOTP
-3. Scan QR code with authenticator app
-4. Save the base32 secret key (not the 6-digit code)
 
 ## 🔍 Verification Steps
 

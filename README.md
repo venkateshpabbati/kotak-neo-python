@@ -3,7 +3,7 @@
 Official Python SDK for Kotak Neo Trading APIs - a modern, well-tested trading client for the Kotak Neo platform.
 
 [![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![PyPI Version](https://img.shields.io/badge/pypi-v3.0.1-green.svg)](https://pypi.org/project/kotakneoapi/)
+[![PyPI Version](https://img.shields.io/badge/pypi-v3.0.2-green.svg)](https://pypi.org/project/kotakneoapi/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/LICENSE)
 
 > **This is the actively maintained Python SDK**, superseding
@@ -20,6 +20,7 @@ Official Python SDK for Kotak Neo Trading APIs - a modern, well-tested trading c
 ✅ **SFeed WebSocket Streaming** - Modern async/await live market feed with typed messages, enriched with `trading_symbol`  
 ✅ **HTTP/2 Transport** - REST calls use HTTP/2 (via httpx) with automatic HTTP/1.1 fallback  
 ✅ **Optional Reliability Utilities** - Opt-in rate limiting, plus retry and circuit-breaker helpers  
+✅ **Enhanced Logging** - Rotating log file with REST/WebSocket tracking and automatic masking of sensitive data  
 ✅ **Comprehensive Error Handling** - Detailed exception hierarchy with input validation  
 ✅ **Type Safety** - Full mypy type checking support  
 ✅ **Extensive Testing** - 100% test coverage (unit, integration, and E2E tests)  
@@ -136,22 +137,27 @@ Detailed documentation for all SDK functions with examples and real API response
 - **[Installation Overview](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/installation/README.md)** - All installation options
 - **[Local Installation](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/installation/local-install.md)** - Install from source (for contributors)
 - **[Platform-Specific Guides](https://github.com/Kotak-Neo/kotak-neo-python/tree/main/docs/installation)** - Windows, macOS, Linux, VS Code
+- **[Jupyter Notebook Setup](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/installation/jupyter.md)** - Kernel setup and using `await` directly in cells (no `asyncio.run()`)
 
 **API Documentation:**
 - **[Complete API Reference](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/functions/README.md)** - All SDK functions
 - **[SFeed WebSocket Guide](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/guides/websocket.md)** - Async streaming client, protocol & migration
+- **[Sync/Multi-Process Integration Guide](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/guides/sync-integration.md)** - Bridging the async feeds into gunicorn/Celery-style sync, multi-process apps
+- **[Logging Guide](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/guides/logging.md)** - `setup_logging()`, log levels & configuration
 - **[All Guides](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/guides/README.md)** - Complete guide index
 
 ## WebSocket Streaming Example (SFeed)
 
 Live market data is delivered through the modern async/await **SFeed** WebSocket
 client. It uses `async for` iteration and returns type-safe Pydantic messages,
-each enriched with its `trading_symbol` (resolved from the subscribe ack).
+each enriched with its `trading_symbol` (resolved from the subscribe ack) —
+except `SFeedMarketStatus`, which isn't tied to a specific instrument (see
+below).
 
 ```python
 import asyncio
 from neo_api_client import NeoAPI
-from neo_api_client.websocket.feed import WsToken, SFeedScrip
+from neo_api_client.websocket.feed import WsToken, SFeedScrip, SFeedMarketStatus
 
 
 async def main():
@@ -178,11 +184,33 @@ async def main():
 asyncio.run(main())
 ```
 
+Market status (open/close/pre-open/etc., not tied to a specific instrument) is a
+separate subscription — `subscribe_exchange()` takes no tokens and delivers
+`SFeedMarketStatus`:
+
+```python
+await ws.subscribe_exchange()
+
+async for message in ws:
+    if isinstance(message, SFeedMarketStatus):
+        print(f"status_code={message.status_code} status={message.status}")
+```
+
+`status` is a static, human-readable string (e.g. `"Market open"`) looked up by
+`status_code` — not the raw wire text, which is unreliable in practice. See
+[Message Types](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/guides/websocket.md#message-types)
+in the guide for the full `MarketStatusCode` table.
+
 > **Note:** The SFeed client works out of the box — its dependencies
 > (`websockets`, `pydantic`) ship with the base install. The legacy callback-based
 > WebSocket (`client.subscribe(...)`, `on_message`, etc.) was **removed in v2.2.0** —
 > see the [SFeed WebSocket guide](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/guides/websocket.md) for the full API and a
 > migration reference.
+
+> **Running this in Jupyter Notebook instead of a script?** Don't wrap it in
+> `asyncio.run()` — Jupyter's kernel already runs its own event loop, so
+> `await` the client's coroutines directly in a cell instead. See the
+> [Jupyter Notebook Setup guide](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/installation/jupyter.md) for the notebook-adapted version of this example and Jupyter-specific troubleshooting.
 
 ## Order & Position Streaming Example
 
@@ -256,10 +284,6 @@ NEO_MOBILE_NUMBER=+919876543210
 # Your UCC (User Client Code) from NEO app Profile section
 NEO_UCC=YOUR_UCC
 
-# TOTP secret key (base32 string from QR code during TOTP registration)
-# This is NOT the 6-digit code - it's the secret key from authenticator setup
-NEO_TOTP_SECRET=YOUR_TOTP_SECRET_KEY
-
 # Your trading MPIN
 NEO_MPIN=123456
 ```
@@ -267,7 +291,8 @@ NEO_MPIN=123456
 **How to get credentials:**
 - **Consumer Key**: NEO app → More → Trade API → Generate application → Copy token
 - **UCC**: NEO app → Profile section
-- **TOTP Secret**: https://www.kotakneo.com/platform/kotak-neo-trade-api/ → Register for TOTP → Note the secret from QR code setup
+
+> TOTP is a 2FA factor and is intentionally not automated via a `.env` secret here — `totp_login()` expects the live 6-digit code. See [`tests/e2e/smoke_test.py`](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/tests/e2e/smoke_test.py) for an example that prompts for it (or optionally auto-generates it from a `NEO_TOTP_SECRET` you add to your own local `.env`, for faster local iteration only).
 
 
 
@@ -318,6 +343,63 @@ into the request path by default** — you opt in):
 - **Rate Limiter** - Token-bucket throttling (per second/minute/hour) to avoid tripping API quotas. Enable with `RESTClientObject(..., enable_rate_limiting=True)`.
 - **Retry Logic** - Exponential backoff with jitter for transient errors, via the `with_retry` / `create_retry_decorator` decorators in `neo_api_client.retry`.
 - **Circuit Breaker** - `CircuitBreaker` in `neo_api_client.circuit_breaker` to stop calling a failing service and let it recover.
+
+### Custom Transport (Migration Hook)
+
+Deployments that previously patched the legacy `requests`-based client's
+connection pool/adapter (custom proxy, mTLS, non-default pool sizing,
+transport-level instrumentation) have the equivalent hook here via `httpx`'s
+own extension points, passed straight through to `NeoAPI(...)`:
+
+```python
+import httpx
+from neo_api_client import NeoAPI
+
+# Full control: mount a custom transport (proxy, mTLS, custom pooling, etc.)
+client = NeoAPI(
+    consumer_key="your-consumer-key-token",
+    transport=httpx.HTTPTransport(
+        proxy="https://proxy.internal:8080", cert=("client.pem", "client.key")
+    ),
+)
+
+# Or just resize the connection pool without a full custom transport:
+client = NeoAPI(
+    consumer_key="your-consumer-key-token",
+    limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+)
+```
+
+`limits` is ignored when `transport` is also given, since a custom transport
+owns its own pooling. Both default to the SDK's existing behavior
+(`max_connections=20`, `max_keepalive_connections=10`, standard `httpx`
+transport) when omitted.
+
+**HTTP/2 and timeouts** are also configurable per client:
+
+```python
+client = NeoAPI(
+    consumer_key="your-consumer-key-token",
+    http2=False,  # force HTTP/1.1 only; default is True (HTTP/2 with automatic HTTP/1.1 fallback)
+    timeout=45,  # default request timeout in seconds for every call; default is 30
+)
+```
+
+`http2` is ignored when `transport` is also given, since a custom transport
+owns its own protocol negotiation. `timeout` sets the client-wide default —
+individual REST calls can still override it per-call via the lower-level
+`RESTClientObject.request(..., timeout=...)`.
+
+**Mutating requests (place/modify/cancel order) are never automatically
+retried or replayed by the SDK.** `RESTClientObject.request()` makes exactly
+one HTTP call per invocation — on a timeout or connection error it raises
+immediately rather than resending, so an ambiguous failure (e.g. the broker
+received the order but the response was lost) never risks a silent duplicate
+order from client-side retry logic. The opt-in retry helpers in
+`neo_api_client.retry` (see below) are not wired into `place_order`/
+`modify_order`/`cancel_order` and must be applied explicitly by the caller if
+wanted — and doing so for a mutating call is the caller's decision to make
+with full awareness of the idempotency risk, not something the SDK does for you.
 
 ## Development
 
@@ -403,6 +485,11 @@ kotak-neo-python/
 - **Issues**: [GitHub Issues](https://github.com/Kotak-Neo/kotak-neo-python/issues)
 - **Email**: support@kotakneo.com
 
+Reporting a bug? Enable file logging with `setup_logging(file_level="INFO")` (see the
+[Logging Guide](https://github.com/Kotak-Neo/kotak-neo-python/blob/main/docs/guides/logging.md)),
+reproduce the issue, and attach the resulting `logs/neo-api-client.log` to your issue —
+sensitive fields are already masked, so it's safe to share as-is.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
@@ -429,6 +516,6 @@ See [CHANGELOG.md](https://github.com/Kotak-Neo/kotak-neo-python/releases) for v
 
 ---
 
-**Version**: 3.0.1  
+**Version**: 3.0.2  
 **Status**: Production/Stable  
 **Built with ❤️ by Kotak Neo Team**
