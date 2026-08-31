@@ -277,13 +277,16 @@ except Exception as e:
 # .env, the TOTP is auto-generated via pyotp; otherwise you're asked for it.
 TOTP_SECRET = config("NEO_TOTP_SECRET", default=None)
 
-if TOTP_SECRET:
+if enter_totp_manually:
+    totp_code = input("Enter TOTP code: ").strip()
+    print("\n[MANUAL TOTP]: received")
+elif TOTP_SECRET:
     totp_generator = pyotp.TOTP(TOTP_SECRET)
     totp_code = totp_generator.now()
-    print(f"\n[AUTO-GENERATED TOTP]: {totp_code}")
+    print("\n[AUTO-GENERATED TOTP]: generated")
 else:
     totp_code = input("\nNEO_TOTP_SECRET not set -- enter TOTP code: ").strip()
-    print(f"\n[MANUAL TOTP]: {totp_code}")
+    print("\n[MANUAL TOTP]: received")
 
 totp_login_params = {
     "mobile_number": MOBILE_NUMBER,
